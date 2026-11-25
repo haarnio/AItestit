@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kaoottinen kaksoisheiluri</title>
+<style>
+  :root { color-scheme: dark; box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: #080a12; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 16px 20px calc(18px + env(safe-area-inset-bottom, 0px));
+    text-align: center; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: rgba(220, 228, 255, .6); letter-spacing: .02em; pointer-events: none;
+    transition: opacity 1.2s ease;
+  }
+  #hint.hide { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Tartu heilurin päähän ja vedä tai pyyhkäise. Tai tartu keskiniveleen ja aseta ulompi varsi toisella sormella.</div>
+<script>
+(function () {
+  var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  var hint = document.getElementById('hint');
+  var W, H, dpr, px, py, L;
+  var G = 9.81, GA = 0, DT = 1 / 480;
+  var gx = 0, gy = 9.81, tgx = 0, tgy = 9.81;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    px = W / 2; py = H * 0.42;
+    var R = Math.min(W / 2, H * 0.4) * 0.92;
+    L = R / 2;
+    trail.length = 0;
+  }
+
+  var s = { a: 2.3, b: 2.9, wa: 0, wb: 0 };
+  var g = { a: 2.3, b: 2.9 + 1e-7, wa: 0, wb: 0 };
+  var trail = [];
+  var chaos = 0, hue = 200, t = 0;
+
+  function deriv(a, b, wa, wb) {
+    var d = a - b, den = 3 - Math.cos(2 * d);
+    var aa = (-G * 3 * Math.sin(a - GA) - G * Math.sin(a - 2 * b + GA) - 2 * Math.sin(d) * (wb * wb + wa * wa * Math.cos(d))) / den;
+    var ab = (2 * Math.sin(d) * (wa * wa * 2 + G * 2 * Math.cos(a - GA) + wb * wb * Math.cos(d))) / den;
+    return [wa, wb, aa, ab];
+  }
+  function step(q) {
+    var k1 = deriv(q.a, q.b, q.wa, q.wb);
+    var k2 = deriv(q.a + DT / 2 * k1[0], q.b + DT / 2 * k1[1], q.wa + DT / 2 * k1[2], q.wb + DT / 2 * k1[3]);
+    var k3 = deriv(q.a + DT / 2 * k2[0], q.b + DT / 2 * k2[1], q.wa + DT / 2 * k2[2], q.wb + DT / 2 * k2[3]);
+    var k4 = deriv(q.a + DT * k3[0], q.b + DT * k3[1], q.wa + DT * k3[2], q.wb + DT * k3[3]);
+    q.a += DT / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+    q.b += DT / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+    q.wa += DT / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+    q.wb += DT / 6 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
+  }
+
+  // Touch / pointer handling (v1.1)
+  // roles: 'end' = finger on outer bob (whole pendulum via IK), 'joint' = finger on middle joint, 'b' = second finger sets outer arm
+  var ptrs = [];
+  var va = 0, vb = 0, tA = 0, tB = 0, pA = 0, pB = 0;
+  var STALE = 90, VMAX = 30;
+  var pivotTap = null, sensorOn = false, listening = false, gotData = false, gotMotion = false;
+  // iOS (WebKit) reports accelerationIncludingGravity with the opposite sign; it is also the only platform with requestPermission
+  var IOS = typeof (window.DeviceMotionEvent || {}).requestPermission === 'function';
+  function showMsg(txt, ms) {
+    hint.textContent = txt; hint.classList.remove('hide');
+    clearTimeout(showMsg.t); showMsg.t = setTimeout(function () { hint.classList.add('hide'); }, ms || 2400);
+  }
+  function orient() {
+    var o = screen.orientation && screen.orientation.angle;
+    if (typeof o !== 'number') o = typeof window.orientation === 'number' ? window.orientation : 0;
+    return ((o % 360) + 360) % 360;
+  }
+  function onMotion(e) {
+    if (!sensorOn) return;
+    var f = e.accelerationIncludingGravity;
+    if (!f || f.x == null || f.y == null) return;
+    gotData = true; gotMotion = true;
+    applyF(IOS ? -f.x : f.x, IOS ? -f.y : f.y);
+  }
+  function applyF(fx, fy) {
+    var o = orient(), x, y;
+    if (o === 90) { x = fy; y = fx; }
+    else if (o === 180) { x = fx; y = -fy; }
+    else if (o === 270) { x = -fy; y = -fx; }
+    else { x = -fx; y = fy; }
+    tgx = x; tgy = y;
+  }
+  // fallback: tilt only, from device orientation angles
+  function onOrient(e) {
+    if (!sensorOn || gotMotion || e.beta == null || e.gamma == null) return;
+    gotData = true;
+    var b = e.beta * Math.PI / 180, c = e.gamma * Math.PI / 180;
+    applyF(-9.81 * Math.cos(b) * Math.sin(c), 9.81 * Math.sin(b));
+  }
+  function why() {
+    if (window.isSecureContext === false) return 'Anturit vaativat suojatun yhteyden (https). Nykyinen: ' + location.protocol;
+    try {
+      var pp = document.permissionsPolicy || document.featurePolicy;
+      if (pp && pp.allowsFeature && !pp.allowsFeature('accelerometer')) return 'Upotus estää anturit. Avaa sivu omana välilehtenään.';
+    } catch (_) {}
+    return 'Anturidataa ei saatu. Tarkista Chromen sivustoasetuksista Liikeanturit.';
+  }
+  function toggleSensor() {
+    if (sensorOn) { sensorOn = false; tgx = 0; tgy = 9.81; showMsg('Anturiohjaus pois'); return; }
+    var DM = window.DeviceMotionEvent;
+    if (!DM) { showMsg('Laite ei tue anturiohjausta'); return; }
+    var go = function () {
+      sensorOn = true; gotData = false; gotMotion = false;
+      if (!listening) { window.addEventListener('devicemotion', onMotion); window.addEventListener('deviceorientation', onOrient); listening = true; }
+      showMsg('Anturiohjaus päällä');
+      setTimeout(function () {
+        if (sensorOn && !gotData) { sensorOn = false; tgx = 0; tgy = 9.81; showMsg(why(), 7000); }
+      }, 2500);
+    };
+    if (typeof DM.requestPermission === 'function') {
+      DM.requestPermission().then(function (r) {
+        if (r === 'granted') go(); else showMsg('Anturien käyttö estetty');
+      }).catch(function () { showMsg('Anturien käyttö estetty'); });
+    } else go();
+  }
+  function wrap(d) { while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; }
+  function clampV(v) { return Math.max(-VMAX, Math.min(VMAX, v)); }
+  function setA(raw, now) {
+    var na = s.a + wrap(raw - s.a), dt = (now - tA) / 1000;
+    if (dt > 0.004) { va = clampV(0.5 * va + 0.5 * (na - pA) / dt); pA = na; tA = now; }
+    s.a = na;
+  }
+  function setB(raw, now) {
+    var nb = s.b + wrap(raw - s.b), dt = (now - tB) / 1000;
+    if (dt > 0.004) { vb = clampV(0.5 * vb + 0.5 * (nb - pB) / dt); pB = nb; tB = now; }
+    s.b = nb;
+  }
+  function ik(x, y) {
+    var dx = x - px, dy = y - py, d = Math.min(Math.hypot(dx, dy), 2 * L * 0.9999);
+    var phi = Math.atan2(dx, dy), al = Math.acos(d / (2 * L));
+    var c1 = Math.abs(wrap(phi + al - s.a)) + Math.abs(wrap(phi - al - s.b));
+    var c2 = Math.abs(wrap(phi - al - s.a)) + Math.abs(wrap(phi + al - s.b));
+    return c1 <= c2 ? [phi + al, phi - al] : [phi - al, phi + al];
+  }
+  function applyPointers() {
+    if (!ptrs.length) return;
+    var now = performance.now();
+    for (var i = 0; i < ptrs.length; i++) {
+      var p = ptrs[i];
+      if (p.role === 'joint') setA(Math.atan2(p.x - px, p.y - py), now);
+      else if (p.role === 'end') { var q = ik(p.x, p.y); setA(q[0], now); setB(q[1], now); }
+      else {
+        var bx = px + L * Math.sin(s.a), by = py + L * Math.cos(s.a);
+        setB(Math.atan2(p.x - bx, p.y - by), now);
+      }
+    }
+    s.wa = s.wb = 0;
+    g.a = s.a; g.b = s.b + 1e-7; g.wa = g.wb = 0;
+    trail.length = 0; chaos = 0;
+  }
+  cv.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    var now = performance.now(), role;
+    if (ptrs.length === 0) {
+      var x1 = px + L * Math.sin(s.a), y1 = py + L * Math.cos(s.a);
+      var x2 = x1 + L * Math.sin(s.b), y2 = y1 + L * Math.cos(s.b);
+      var d1 = Math.hypot(e.clientX - x1, e.clientY - y1), d2 = Math.hypot(e.clientX - x2, e.clientY - y2);
+      if (Math.hypot(e.clientX - px, e.clientY - py) < 26 && d2 > 34) { pivotTap = { id: e.pointerId, x: e.clientX, y: e.clientY }; return; }
+      role = d2 <= d1 ? 'end' : 'joint';
+      va = vb = 0; pA = s.a; pB = s.b; tA = tB = now;
+    } else if (ptrs.length === 1 && ptrs[0].role === 'joint') {
+      role = 'b'; vb = 0; pB = s.b; tB = now;
+    } else return;
+    ptrs.push({ id: e.pointerId, x: e.clientX, y: e.clientY, role: role });
+    hint.classList.add('hide');
+    applyPointers();
+  });
+  cv.addEventListener('pointermove', function (e) {
+    var hit = false;
+    for (var i = 0; i < ptrs.length; i++) if (ptrs[i].id === e.pointerId) { ptrs[i].x = e.clientX; ptrs[i].y = e.clientY; hit = true; }
+    if (hit) applyPointers();
+  });
+  function up(e) {
+    if (pivotTap && pivotTap.id === e.pointerId) {
+      var okTap = e.type === 'pointerup' && Math.hypot(e.clientX - pivotTap.x, e.clientY - pivotTap.y) < 14;
+      pivotTap = null;
+      if (okTap) toggleSensor();
+      return;
+    }
+    var p = null, now = performance.now();
+    for (var i = 0; i < ptrs.length; i++) if (ptrs[i].id === e.pointerId) p = ptrs[i];
+    if (!p) return;
+    if ((p.role === 'joint' || p.role === 'end') && now - tA > STALE) va = 0;
+    if ((p.role === 'b' || p.role === 'end') && now - tB > STALE) vb = 0;
+    ptrs = ptrs.filter(function (q) { return q !== p; });
+    if (!ptrs.length) {
+      s.wa = va; s.wb = vb;
+      g.a = s.a; g.b = s.b + 1e-7; g.wa = va; g.wb = vb;
+      va = vb = 0;
+    }
+  }
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', up);
+  window.addEventListener('resize', resize);
+  document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+
+  function frame(now) {
+    var dt = Math.min((now - (frame.last || now)) / 1000, 1 / 30);
+    frame.last = now;
+    var ke = Math.min(1, dt * 14);
+    gx += (tgx - gx) * ke; gy += (tgy - gy) * ke;
+    var gm = Math.hypot(gx, gy);
+    if (gm > 45) { gx *= 45 / gm; gy *= 45 / gm; gm = 45; }
+    G = Math.max(gm, 0.05); GA = Math.atan2(gx, gy);
+    if (!ptrs.length) {
+      var n = Math.round(dt / DT);
+      for (var i = 0; i < n; i++) { step(s); step(g); }
+      t += dt;
+    }
+    // chaos estimate: divergence of a nearby twin pendulum, weighted by motion
+    var d = Math.hypot(s.a - g.a, s.b - g.b) + 1e-12;
+    var div = Math.max(0, Math.min(1, (Math.log10(d) + 7) / 7));
+    var act = Math.min(1, (Math.abs(s.wb) + Math.abs(s.wa)) / 12);
+    var target = ptrs.length ? 0 : div * (0.35 + 0.65 * act);
+    chaos += (target - chaos) * Math.min(1, dt * 1.5);
+    hue += ((205 + chaos * 130) - hue) * Math.min(1, dt * 2);
+
+    // background
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#080a12';
+    ctx.fillRect(0, 0, W, H);
+    var gr = ctx.createRadialGradient(px, py, 0, px, py, Math.max(W, H) * 0.85);
+    gr.addColorStop(0, 'hsla(' + hue + ',70%,38%,' + (0.05 + chaos * 0.28) + ')');
+    gr.addColorStop(0.5, 'hsla(' + (hue + 40) + ',65%,25%,' + (0.02 + chaos * 0.14) + ')');
+    gr.addColorStop(1, 'hsla(' + (hue + 80) + ',60%,15%,0)');
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, W, H);
+
+    var x1 = px + L * Math.sin(s.a), y1 = py + L * Math.cos(s.a);
+    var x2 = x1 + L * Math.sin(s.b), y2 = y1 + L * Math.cos(s.b);
+
+    // trail
+    if (!ptrs.length) { trail.push({ x: x2, y: y2, h: 190 + chaos * 150 }); if (trail.length > 420) trail.shift(); }
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (var j = 1; j < trail.length; j++) {
+      var f = j / trail.length;
+      ctx.strokeStyle = 'hsla(' + trail[j].h + ',90%,62%,' + (f * f * 0.85) + ')';
+      ctx.lineWidth = 0.6 + f * 3;
+      ctx.beginPath(); ctx.moveTo(trail[j - 1].x, trail[j - 1].y); ctx.lineTo(trail[j].x, trail[j].y); ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    // rods
+    var rg = ctx.createLinearGradient(px, py, x2, y2);
+    rg.addColorStop(0, '#e8ecff'); rg.addColorStop(1, '#9aa6d6');
+    ctx.strokeStyle = rg; ctx.lineWidth = 3.5; ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(160,180,255,.5)'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // bobs
+    var r = Math.max(10, L * 0.1);
+    function bob(x, y, hh) {
+      ctx.shadowColor = 'hsla(' + hh + ',90%,65%,.9)'; ctx.shadowBlur = 22;
+      var bg = ctx.createRadialGradient(x - r * .35, y - r * .35, r * .1, x, y, r);
+      bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.35, 'hsl(' + hh + ',85%,72%)'); bg.addColorStop(1, 'hsl(' + hh + ',70%,38%)');
+      ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    bob(x1, y1, 210 + chaos * 100);
+    bob(x2, y2, 190 + chaos * 150);
+
+    // pivot
+    ctx.fillStyle = '#0b0e1a'; ctx.strokeStyle = '#dfe5ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, 6.2832); ctx.fill(); ctx.stroke();
+    if (sensorOn) {
+      var gl = Math.hypot(gx, gy) || 1, ux = gx / gl, uy = gy / gl;
+      ctx.strokeStyle = 'hsla(165,80%,65%,' + (0.4 + 0.15 * Math.sin(now / 500)) + ')'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, py, 12, 0, 6.2832); ctx.stroke();
+      ctx.fillStyle = 'hsla(165,85%,70%,.9)';
+      ctx.beginPath(); ctx.arc(px + ux * 12, py + uy * 12, 2.5, 0, 6.2832); ctx.fill();
+    }
+
+    // touch markers
+    for (var k = 0; k < ptrs.length; k++) {
+      ctx.strokeStyle = 'rgba(220,230,255,.35)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(ptrs[k].x, ptrs[k].y, 30, 0, 6.2832); ctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  }
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
