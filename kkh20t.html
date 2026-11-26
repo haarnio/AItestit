@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kaoottinen kaksoisheiluri 2.0</title>
+<style>
+  :root { color-scheme: dark; box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: #080a12; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 16px 20px calc(18px + env(safe-area-inset-bottom, 0px));
+    text-align: center; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: rgba(220, 228, 255, .6); letter-spacing: .02em; pointer-events: none; transition: opacity 1.2s ease;
+  }
+  #hint.hide { opacity: 0; }
+  #panel {
+    position: fixed; left: 0; right: 0; bottom: 0; max-width: 520px; margin: 0 auto;
+    padding: 14px 22px calc(16px + env(safe-area-inset-bottom, 0px));
+    background: rgba(14, 18, 34, .8); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border-radius: 18px 18px 0 0; border: 1px solid rgba(160, 180, 255, .15); border-bottom: 0;
+    font: 13px/1.2 system-ui, -apple-system, "Segoe UI", sans-serif; color: rgba(220, 228, 255, .8);
+    opacity: 0; transform: translateY(24px); pointer-events: none; transition: opacity .35s ease, transform .35s ease;
+  }
+  #panel.open { opacity: 1; transform: none; pointer-events: auto; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .row label { width: 64px; }
+  .row output { width: 38px; text-align: right; font-variant-numeric: tabular-nums; opacity: .7; }
+  .row input { flex: 1; accent-color: #7fa6ff; min-width: 0; }
+  #btns { text-align: center; }
+  #reset, #stop { margin: 6px 5px 0; background: none; border: 1px solid rgba(160, 180, 255, .3); color: inherit; border-radius: 14px; padding: 6px 16px; font: inherit; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Tartu heilurin päähän ja vedä tai pyyhkäise. Pitkä painallus (0,5 s) kiinnityspisteeseen avaa säädöt, lyhyt napautus kytkee anturit.</div>
+<div id="panel"></div>
+<script>
+(function () {
+  var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  var hint = document.getElementById('hint'), panel = document.getElementById('panel');
+  var W, H, dpr, px, py, K = 80;
+  var G = 9.81, GA = 0, DT = 1 / 480;
+  var gx = 0, gy = 9.81, tgx = 0, tgy = 9.81;
+  var MA = 1, MB = 1, LA = 1, LB = 1, FR = 0, paused = false;
+
+  function target() {
+    var reach = LA + LB, mg = 0.055 * Math.min(W, H) * Math.cbrt(Math.max(MA, MB)) + 14;
+    return Math.max(10, Math.min((W / 2 - mg) / reach, (py - mg) / reach, (H - py - mg) / reach));
+  }
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    px = W / 2; py = H * 0.45; K = target();
+  }
+
+  var s = { a: 2.3, b: 2.9, wa: 0, wb: 0 };
+  var g = { a: 2.3, b: 2.9 + 1e-7, wa: 0, wb: 0 };
+  var trail = [], chaos = 0, hue = 200;
+
+  function deriv(a, b, wa, wb) {
+    var d = a - b, sn = Math.sin(d), c = Math.cos(d), den = 2 * MA + MB - MB * Math.cos(2 * d);
+    var aa = (-G * (2 * MA + MB) * Math.sin(a - GA) - MB * G * Math.sin(a - 2 * b + GA) - 2 * sn * MB * (wb * wb * LB + wa * wa * LA * c)) / (LA * den);
+    var ab = (2 * sn * (wa * wa * LA * (MA + MB) + G * (MA + MB) * Math.cos(a - GA) + wb * wb * LB * MB * c)) / (LB * den);
+    return [wa, wb, aa - FR * wa, ab - FR * wb];
+  }
+  function step(q) {
+    var k1 = deriv(q.a, q.b, q.wa, q.wb);
+    var k2 = deriv(q.a + DT / 2 * k1[0], q.b + DT / 2 * k1[1], q.wa + DT / 2 * k1[2], q.wb + DT / 2 * k1[3]);
+    var k3 = deriv(q.a + DT / 2 * k2[0], q.b + DT / 2 * k2[1], q.wa + DT / 2 * k2[2], q.wb + DT / 2 * k2[3]);
+    var k4 = deriv(q.a + DT * k3[0], q.b + DT * k3[1], q.wa + DT * k3[2], q.wb + DT * k3[3]);
+    q.a += DT / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+    q.b += DT / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+    q.wa += DT / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+    q.wb += DT / 6 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
+  }
+  function syncGhost() { g.a = s.a; g.b = s.b + 1e-7; g.wa = s.wa; g.wb = s.wb; }
+  function rad(m) { return Math.max(9, 0.1 * K * Math.cbrt(m)); }
+
+  // ---- Settings panel (long press) ----
+  var defs = [['Massa 1', 'ma', 0.5, 2, 1], ['Massa 2', 'mb', 0.5, 2, 1], ['Varsi 1', 'la', 0.5, 1.5, 1], ['Varsi 2', 'lb', 0.5, 1.5, 1], ['Kitka', 'fr', 0, 1, 0]];
+  var inputs = {}, outs = {}, panelOpen = false, panelTimer = 0;
+  function setParam(k, v) { if (k === 'ma') MA = v; else if (k === 'mb') MB = v; else if (k === 'la') LA = v; else if (k === 'fr') FR = 1.5 * v * v; else LB = v; }
+  function fmt(v) { return v.toFixed(2).replace('.', ','); }
+  defs.forEach(function (d) {
+    var row = document.createElement('div'); row.className = 'row';
+    var lab = document.createElement('label'); lab.textContent = d[0];
+    var inp = document.createElement('input'); inp.type = 'range'; inp.min = d[2]; inp.max = d[3]; inp.step = d[1] === 'fr' ? 0.01 : 0.05; inp.value = d[4];
+    var out = document.createElement('output'); out.textContent = fmt(d[4]);
+    inp.addEventListener('input', function () {
+      var v = parseFloat(inp.value); setParam(d[1], v); out.textContent = fmt(v); syncGhost(); trail.length = 0; keepPanel();
+    });
+    inputs[d[1]] = inp; outs[d[1]] = out;
+    row.appendChild(lab); row.appendChild(inp); row.appendChild(out); panel.appendChild(row);
+  });
+  var rst = document.createElement('button'); rst.id = 'reset'; rst.textContent = 'Palauta';
+  rst.addEventListener('click', function () {
+    defs.forEach(function (d) { setParam(d[1], d[4]); inputs[d[1]].value = d[4]; outs[d[1]].textContent = fmt(d[4]); });
+    syncGhost(); trail.length = 0; keepPanel();
+  });
+  var stp = document.createElement('button'); stp.id = 'stop'; stp.textContent = 'Pysäytä';
+  function setPaused(v) { paused = v; stp.textContent = v ? 'Jatka' : 'Pysäytä'; }
+  stp.addEventListener('click', function () { setPaused(!paused); keepPanel(); });
+  var btns = document.createElement('div'); btns.id = 'btns'; btns.appendChild(stp); btns.appendChild(rst); panel.appendChild(btns);
+  function keepPanel() { clearTimeout(panelTimer); panelTimer = setTimeout(closePanel, 7000); }
+  function openPanel() { panelOpen = true; panel.classList.add('open'); hint.classList.add('hide'); keepPanel(); if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {} }
+  function closePanel() { panelOpen = false; panel.classList.remove('open'); clearTimeout(panelTimer); }
+
+  // ---- Sensors ----
+  var pivotTap = null, sensorOn = false, listening = false, gotData = false, gotMotion = false;
+  function detectDevice() {
+    var ua = navigator.userAgent || '', pf = navigator.platform || '';
+    if (/iPhone|iPad|iPod/.test(ua) || (pf === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'ios';
+    if (/Android/i.test(ua)) return 'android';
+    return 'other';
+  }
+  var device = detectDevice();
+  // iOS (WebKit) reports accelerationIncludingGravity with the opposite sign to Android
+  var IOS = device === 'ios';
+  function showMsg(txt, ms) {
+    hint.textContent = txt; hint.classList.remove('hide');
+    clearTimeout(showMsg.t); showMsg.t = setTimeout(function () { hint.classList.add('hide'); }, ms || 2400);
+  }
+  function orient() {
+    var o = screen.orientation && screen.orientation.angle;
+    if (typeof o !== 'number') o = typeof window.orientation === 'number' ? window.orientation : 0;
+    return ((o % 360) + 360) % 360;
+  }
+  function applyF(fx, fy) {
+    var o = orient(), x, y;
+    if (o === 90) { x = fy; y = fx; }
+    else if (o === 180) { x = fx; y = -fy; }
+    else if (o === 270) { x = -fy; y = -fx; }
+    else { x = -fx; y = fy; }
+    tgx = x; tgy = y;
+  }
+  function onMotion(e) {
+    if (!sensorOn) return;
+    var f = e.accelerationIncludingGravity;
+    if (!f || f.x == null || f.y == null) return;
+    gotData = true; gotMotion = true;
+    applyF(IOS ? -f.x : f.x, IOS ? -f.y : f.y);
+  }
+  function onOrient(e) {
+    if (!sensorOn || gotMotion || e.beta == null || e.gamma == null) return;
+    gotData = true;
+    var b = e.beta * Math.PI / 180, c = e.gamma * Math.PI / 180;
+    applyF(-9.81 * Math.cos(b) * Math.sin(c), 9.81 * Math.sin(b));
+  }
+  function why() {
+    if (window.isSecureContext === false) return 'Anturit vaativat suojatun yhteyden (https). Nykyinen: ' + location.protocol;
+    try {
+      var pp = document.permissionsPolicy || document.featurePolicy;
+      if (pp && pp.allowsFeature && !pp.allowsFeature('accelerometer')) return 'Upotus estää anturit. Avaa sivu omana välilehtenään.';
+    } catch (_) {}
+    return 'Anturidataa ei saatu. Tarkista Chromen sivustoasetuksista Liikeanturit.';
+  }
+  function toggleSensor() {
+    if (sensorOn) { sensorOn = false; tgx = 0; tgy = 9.81; showMsg('Anturiohjaus pois'); return; }
+    var DM = window.DeviceMotionEvent;
+    if (!DM) { showMsg('Laite ei tue anturiohjausta'); return; }
+    var go = function () {
+      sensorOn = true; gotData = false; gotMotion = false;
+      if (!listening) { window.addEventListener('devicemotion', onMotion); window.addEventListener('deviceorientation', onOrient); listening = true; }
+      showMsg('Anturiohjaus päällä');
+      setTimeout(function () {
+        if (sensorOn && !gotData) { sensorOn = false; tgx = 0; tgy = 9.81; showMsg(why(), 7000); }
+      }, 2500);
+    };
+    if (typeof DM.requestPermission === 'function') {
+      DM.requestPermission().then(function (r) {
+        if (r === 'granted') go(); else showMsg('Anturien käyttö estetty');
+      }).catch(function () { showMsg('Anturien käyttö estetty'); });
+    } else go();
+  }
+
+  // ---- Touch ----
+  var ptrs = [], lp = null;
+  var va = 0, vb = 0, tA = 0, tB = 0, pA = 0, pB = 0, STALE = 90, VMAX = 30;
+  function wrap(d) { while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; }
+  function clampV(v) { return Math.max(-VMAX, Math.min(VMAX, v)); }
+  function setA(raw, now) {
+    var na = s.a + wrap(raw - s.a), dt = (now - tA) / 1000;
+    if (dt > 0.004) { va = clampV(0.5 * va + 0.5 * (na - pA) / dt); pA = na; tA = now; }
+    s.a = na;
+  }
+  function setB(raw, now) {
+    var nb = s.b + wrap(raw - s.b), dt = (now - tB) / 1000;
+    if (dt > 0.004) { vb = clampV(0.5 * vb + 0.5 * (nb - pB) / dt); pB = nb; tB = now; }
+    s.b = nb;
+  }
+  function ik(x, y) {
+    var dx = (x - px) / K, dy = (y - py) / K;
+    var d = Math.max(Math.abs(LA - LB) + 1e-3, Math.min(Math.hypot(dx, dy), LA + LB - 1e-4));
+    var phi = Math.atan2(dx, dy), al = Math.acos(Math.max(-1, Math.min(1, (LA * LA + d * d - LB * LB) / (2 * LA * d))));
+    var best = null, bc = 1e9;
+    [al, -al].forEach(function (sg) {
+      var a1 = phi + sg, b1 = Math.atan2(dx - LA * Math.sin(a1), dy - LA * Math.cos(a1));
+      var c = Math.abs(wrap(a1 - s.a)) + Math.abs(wrap(b1 - s.b));
+      if (c < bc) { bc = c; best = [a1, b1]; }
+    });
+    return best;
+  }
+  function applyPointers() {
+    if (!ptrs.length) return;
+    var now = performance.now();
+    for (var i = 0; i < ptrs.length; i++) {
+      var p = ptrs[i];
+      if (p.role === 'joint') setA(Math.atan2(p.x - px, p.y - py), now);
+      else if (p.role === 'end') { var q = ik(p.x, p.y); setA(q[0], now); setB(q[1], now); }
+      else {
+        var bx = px + K * LA * Math.sin(s.a), by = py + K * LA * Math.cos(s.a);
+        setB(Math.atan2(p.x - bx, p.y - by), now);
+      }
+    }
+    if (paused) setPaused(false);
+    s.wa = s.wb = 0; syncGhost(); trail.length = 0; chaos = 0;
+  }
+  function cancelLP() { if (lp) { clearTimeout(lp.t); lp = null; } }
+  cv.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    if (panelOpen) { closePanel(); return; }
+    var now = performance.now(), role;
+    if (ptrs.length === 0) {
+      var x1 = px + K * LA * Math.sin(s.a), y1 = py + K * LA * Math.cos(s.a);
+      var x2 = x1 + K * LB * Math.sin(s.b), y2 = y1 + K * LB * Math.cos(s.b);
+      var d1 = Math.hypot(e.clientX - x1, e.clientY - y1), d2 = Math.hypot(e.clientX - x2, e.clientY - y2);
+      if (Math.hypot(e.clientX - px, e.clientY - py) < 26 && d2 > 34) {
+        pivotTap = { id: e.pointerId, x: e.clientX, y: e.clientY, long: false };
+        pivotTap.t = setTimeout(function () { if (pivotTap) { pivotTap.long = true; openPanel(); } }, 500);
+        return;
+      }
+      role = d2 <= d1 ? 'end' : 'joint';
+      va = vb = 0; pA = s.a; pB = s.b; tA = tB = now;
+    } else if (ptrs.length === 1 && ptrs[0].role === 'joint') {
+      role = 'b'; vb = 0; pB = s.b; tB = now;
+    } else return;
+    ptrs.push({ id: e.pointerId, x: e.clientX, y: e.clientY, role: role });
+    hint.classList.add('hide');
+    applyPointers();
+  });
+  cv.addEventListener('pointermove', function (e) {
+    if (pivotTap && pivotTap.id === e.pointerId && Math.hypot(e.clientX - pivotTap.x, e.clientY - pivotTap.y) > 14) clearTimeout(pivotTap.t);
+    var hit = false;
+    for (var i = 0; i < ptrs.length; i++) if (ptrs[i].id === e.pointerId) { ptrs[i].x = e.clientX; ptrs[i].y = e.clientY; hit = true; }
+    if (hit) applyPointers();
+  });
+  function up(e) {
+    if (lp && lp.id === e.pointerId) cancelLP();
+    if (pivotTap && pivotTap.id === e.pointerId) {
+      clearTimeout(pivotTap.t);
+      var okTap = e.type === 'pointerup' && !pivotTap.long && Math.hypot(e.clientX - pivotTap.x, e.clientY - pivotTap.y) < 14;
+      pivotTap = null;
+      if (okTap) toggleSensor();
+      return;
+    }
+    var p = null, now = performance.now();
+    for (var i = 0; i < ptrs.length; i++) if (ptrs[i].id === e.pointerId) p = ptrs[i];
+    if (!p) return;
+    if ((p.role === 'joint' || p.role === 'end') && now - tA > STALE) va = 0;
+    if ((p.role === 'b' || p.role === 'end') && now - tB > STALE) vb = 0;
+    ptrs = ptrs.filter(function (q) { return q !== p; });
+    if (!ptrs.length) { s.wa = va; s.wb = vb; syncGhost(); va = vb = 0; }
+  }
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', up);
+  window.addEventListener('resize', resize);
+  document.addEventListener('touchmove', function (e) {
+    if (!(e.target.closest && e.target.closest('#panel'))) e.preventDefault();
+  }, { passive: false });
+
+  function frame(now) {
+    var dt = Math.min((now - (frame.last || now)) / 1000, 1 / 30);
+    frame.last = now;
+    var ke = Math.min(1, dt * 14);
+    gx += (tgx - gx) * ke; gy += (tgy - gy) * ke;
+    var gm = Math.hypot(gx, gy);
+    if (gm > 45) { gx *= 45 / gm; gy *= 45 / gm; gm = 45; }
+    G = Math.max(gm, 0.05); GA = Math.atan2(gx, gy);
+    K += (target() - K) * Math.min(1, dt * 10);
+    if (!ptrs.length && !paused) {
+      var n = Math.round(dt / DT);
+      for (var i = 0; i < n; i++) { step(s); step(g); }
+    }
+    var d = Math.hypot(s.a - g.a, s.b - g.b) + 1e-12;
+    var div = Math.max(0, Math.min(1, (Math.log10(d) + 7) / 7));
+    var act = Math.min(1, (Math.abs(s.wb) + Math.abs(s.wa)) / 12);
+    var tg = ptrs.length ? 0 : div * (0.35 + 0.65 * act);
+    chaos += (tg - chaos) * Math.min(1, dt * 1.5);
+    hue += ((205 + chaos * 130) - hue) * Math.min(1, dt * 2);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#080a12'; ctx.fillRect(0, 0, W, H);
+    var gr = ctx.createRadialGradient(px, py, 0, px, py, Math.max(W, H) * 0.85);
+    gr.addColorStop(0, 'hsla(' + hue + ',70%,38%,' + (0.05 + chaos * 0.28) + ')');
+    gr.addColorStop(0.5, 'hsla(' + (hue + 40) + ',65%,25%,' + (0.02 + chaos * 0.14) + ')');
+    gr.addColorStop(1, 'hsla(' + (hue + 80) + ',60%,15%,0)');
+    ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+
+    var u1x = LA * Math.sin(s.a), u1y = LA * Math.cos(s.a);
+    var u2x = u1x + LB * Math.sin(s.b), u2y = u1y + LB * Math.cos(s.b);
+    var x1 = px + K * u1x, y1 = py + K * u1y, x2 = px + K * u2x, y2 = py + K * u2y;
+
+    if (!ptrs.length && !paused) { trail.push({ x: u2x, y: u2y, h: 190 + chaos * 150 }); if (trail.length > 420) trail.shift(); }
+    ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round';
+    for (var j = 1; j < trail.length; j++) {
+      var f = j / trail.length;
+      ctx.strokeStyle = 'hsla(' + trail[j].h + ',90%,62%,' + (f * f * 0.85) + ')';
+      ctx.lineWidth = 0.6 + f * 3;
+      ctx.beginPath(); ctx.moveTo(px + K * trail[j - 1].x, py + K * trail[j - 1].y); ctx.lineTo(px + K * trail[j].x, py + K * trail[j].y); ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    var rg = ctx.createLinearGradient(px, py, x2, y2);
+    rg.addColorStop(0, '#e8ecff'); rg.addColorStop(1, '#9aa6d6');
+    ctx.strokeStyle = rg; ctx.lineWidth = 3.5; ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(160,180,255,.5)'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    function bob(x, y, r, hh) {
+      ctx.shadowColor = 'hsla(' + hh + ',90%,65%,.9)'; ctx.shadowBlur = 22;
+      var bg = ctx.createRadialGradient(x - r * .35, y - r * .35, r * .1, x, y, r);
+      bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.35, 'hsl(' + hh + ',85%,72%)'); bg.addColorStop(1, 'hsl(' + hh + ',70%,38%)');
+      ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    bob(x1, y1, rad(MA), 210 + chaos * 100);
+    bob(x2, y2, rad(MB), 190 + chaos * 150);
+
+    ctx.fillStyle = '#0b0e1a'; ctx.strokeStyle = '#dfe5ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, 6.2832); ctx.fill(); ctx.stroke();
+    if (sensorOn) {
+      var gl = Math.hypot(gx, gy) || 1, ux = gx / gl, uy = gy / gl;
+      ctx.strokeStyle = 'hsla(165,80%,65%,' + (0.4 + 0.15 * Math.sin(now / 500)) + ')'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, py, 12, 0, 6.2832); ctx.stroke();
+      ctx.fillStyle = 'hsla(165,85%,70%,.9)';
+      ctx.beginPath(); ctx.arc(px + ux * 12, py + uy * 12, 2.5, 0, 6.2832); ctx.fill();
+    }
+    for (var k = 0; k < ptrs.length; k++) {
+      ctx.strokeStyle = 'rgba(220,230,255,.35)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(ptrs[k].x, ptrs[k].y, 30, 0, 6.2832); ctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  }
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
